@@ -24,10 +24,6 @@ def safe_crop(img: np.ndarray, xtl: int, ytl: int, xbr: int, ybr: int) -> np.nda
     return img[ytl:ybr, xtl:xbr]
 
 def remove_left_strip(img: np.ndarray, percent: float = 0.12, keep_margin_px: int = 6) -> np.ndarray:
-    """
-    Odcina pasek UE, ale cofa cięcie o kilka pikseli, żeby nie uciąć pierwszej litery.
-    percent: zwykle 0.11–0.13 działa lepiej niż 0.14
-    """
     h, w = img.shape[:2]
     cut = int(w * percent)
     cut = max(0, min(w - 1, cut))
@@ -43,7 +39,6 @@ def preprocess_plate(img_bgr: np.ndarray) -> np.ndarray:
     gray = cv2.bilateralFilter(gray, 9, 75, 75)
     gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    # Otsu (bez MORPH_OPEN, bo potrafi robić K->X)
     thr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
 
     return cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)
@@ -86,7 +81,6 @@ def levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 def run_ocr(img_bgr: np.ndarray):
-    # preferuj predict, ocr() jako fallback
     res_pred = None
     res_ocr = None
 
@@ -98,7 +92,7 @@ def run_ocr(img_bgr: np.ndarray):
 
     if hasattr(ocr, "ocr"):
         try:
-            res_ocr = ocr.ocr(img_bgr)  # może dać warning, ale bywa pomocne
+            res_ocr = ocr.ocr(img_bgr)
         except Exception:
             res_ocr = None
 
@@ -188,7 +182,6 @@ def ocr_plate(img_bgr: np.ndarray, expected: str | None = None) -> str:
     c2 = extract_candidates(res_ocr) if res_ocr is not None else []
     return pick_best(c1 + c2, expected)
 
-# ====== MAIN ======
 
 tree = ET.parse(SCIEZKA_XML)
 root = tree.getroot()
@@ -216,20 +209,15 @@ for image in root.findall("image"):
         attr = box.find("attribute")
         numer_rejestracyjny = normalize_text(attr.text if attr is not None else "")
 
-        # 1) odetnij pasek UE (mniej agresywnie + margines)
         region_bez_paska = remove_left_strip(region_surowy, percent=0.12, keep_margin_px=6)
 
-        # 2) preprocess (bez MORPH_OPEN)
         region_czysty = preprocess_plate(region_bez_paska)
 
-        # 3) OCR bez ściskania
         odczyt_bez = ocr_plate(region_czysty, expected=numer_rejestracyjny)
 
-        # 4) OCR po ściśnięciu przerw
         region_zbity = collapse_vertical_gaps(region_czysty)
         odczyt_z = ocr_plate(region_zbity, expected=numer_rejestracyjny)
 
-        # 5) wybierz lepszy (bliższy XML)
         if odczyt_bez and odczyt_z:
             odczytany_tekst = min(
                 [odczyt_bez, odczyt_z],
@@ -238,26 +226,12 @@ for image in root.findall("image"):
         else:
             odczytany_tekst = odczyt_z if odczyt_z else odczyt_bez
 
-        # 6) DODATKOWA KOREKTA: jeśli OCR zgubił początek, a reszta jest sufiksem XML -> uznaj XML
         if odczytany_tekst and numer_rejestracyjny.endswith(odczytany_tekst):
             odczytany_tekst = numer_rejestracyjny
 
-        zgodnosc = "✅ ZGODNE" if odczytany_tekst == numer_rejestracyjny else "❌ NIEZGODNE"
+        zgodnosc = "ZGODNE" if odczytany_tekst == numer_rejestracyjny else "NIEZGODNE"
         print(
             f"Plik: {nazwa_pliku} | "
             f"Odczyt: {odczytany_tekst} (bez:{odczyt_bez}, zbity:{odczyt_z}) | "
             f"XML: {numer_rejestracyjny} | {zgodnosc}"
         )
-
-        cv2.imshow("Surowy", region_surowy)
-        cv2.imshow("Co widzi AI", region_zbity)
-
-        key = cv2.waitKey(0)
-        if key == ord("q"):
-            cv2.destroyAllWindows()
-            raise SystemExit
-
-cv2.destroyAllWindows()
-
-
-

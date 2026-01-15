@@ -1,5 +1,5 @@
-paddlepaddle-gpu
+paddlepaddle
 paddleocr
 opencv-python
 lxml
-kagglehub
+ultralytics
