@@ -9,11 +9,9 @@ import easyocr
 
 logging.getLogger("easyocr").setLevel(logging.WARNING)
 
-# Załaduj model YOLO
 MODEL_PATH = "runs/detect/train8/weights/best.pt"
 yolo_model = YOLO(MODEL_PATH)
 
-# Załaduj EasyOCR z GPU (bardziej dokładny dla tablic rejestracyjnych)
 ocr = easyocr.Reader(['en'], gpu=True)
 
 def safe_crop(img: np.ndarray, xtl: int, ytl: int, xbr: int, ybr: int) -> np.ndarray:
@@ -30,24 +28,19 @@ def remove_left_strip(img: np.ndarray, percent: float = 0.12, keep_margin_px: in
     h, w = img.shape[:2]
     cut = int(w * percent)
     cut = max(0, min(w - 1, cut))
-    cut = max(0, cut - keep_margin_px)  # zostaw margines
+    cut = max(0, cut - keep_margin_px)
     return img[:, cut:]
 
 def preprocess_plate(img_bgr: np.ndarray) -> np.ndarray:
-    """Preprocessing tablicy dla lepszej dokładności OCR"""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     
-    # CLAHE dla kontrastu
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
     
-    # Denoise
     gray = cv2.bilateralFilter(gray, 9, 75, 75)
     
-    # Rozszerz dla lepszego OCR (ale nie aż 3x)
     gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
     
-    # Zwykły Otsu - lepszy dla tablic niż adaptacyjny
     thr = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     
     return cv2.cvtColor(thr, cv2.COLOR_GRAY2BGR)
@@ -100,7 +93,7 @@ def fuzzy_match(recognized: str, expected_list: list, threshold: int = 3) -> str
     
     for expected in expected_list:
         distance = levenshtein(recognized, expected)
-        # Jeśli dystans jest mały (max 3 znaki różnicy) - zwróć oczekiwany
+        
         if distance < best_distance and distance <= threshold:
             best_distance = distance
             best_match = expected
@@ -124,24 +117,24 @@ def pick_best(cands: list[str], expected: str | None) -> str:
 def ocr_plate(img_bgr: np.ndarray, expected: str | None = None) -> str:
     """Wyciąga tekst z obrazu tablicy rejestracyjnej używając EasyOCR"""
     try:
-        # EasyOCR zwraca listę: [(bbox, text, confidence), ...]
+        
         results = ocr.readtext(img_bgr, detail=1)
         
         if not results:
             return ""
         
-        # Filtruj z umiarkowaną pewnością
+        
         texts = []
         confidences = []
         for (bbox, text, confidence) in results:
-            if confidence > 0.2 and text.strip():  # Obniż próg do 0.2
+            if confidence > 0.2 and text.strip():  
                 texts.append(text.strip())
                 confidences.append(confidence)
         
         if not texts:
             return ""
         
-        # Połącz teksty
+        
         full_text = "".join(texts)
         avg_conf = sum(confidences) / len(confidences) if confidences else 0
         
@@ -154,7 +147,7 @@ def ocr_plate(img_bgr: np.ndarray, expected: str | None = None) -> str:
 
 # ====== MAIN: YOLO + EasyOCR ======
 
-# Wczytaj annotations.xml aby mieć oczekiwane numery
+
 xml_path = "dataset/annotations/annotations.xml"
 expected_plates = {}
 
@@ -170,9 +163,9 @@ try:
                     expected_plates[img_name] = []
                 expected_plates[img_name].append(normalize_text(attr.text))
 except Exception as e:
-    print(f"⚠️ Błąd przy wczytywaniu XML: {e}")
+    print(f"Błąd przy wczytywaniu XML: {e}")
 
-# Wczytaj wszystkie obrazy z folderu
+
 FOLDER_ZDJEC = "dataset/images"
 image_files = [f for f in os.listdir(FOLDER_ZDJEC) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
 
@@ -187,55 +180,55 @@ for image_file in image_files:
     obraz = cv2.imread(image_path)
     
     if obraz is None:
-        print(f"❌ Błąd przy wczytywaniu: {image_file}")
+        print(f" Błąd przy wczytywaniu: {image_file}")
         continue
+
     
-    # YOLO detekacja tablic rejestracyjnych
     yolo_results = yolo_model.predict(obraz, conf=0.5)
     
     if not yolo_results or len(yolo_results[0].boxes) == 0:
-        print(f"⚠️  {image_file} - Brak detekcji tablic YOLO")
+        print(f" {image_file} - Brak detekcji tablic YOLO")
         continue
     
-    # Przetwórz każdą wykrytą tablicę
+    
     for idx, box in enumerate(yolo_results[0].boxes):
         x1, y1, x2, y2 = map(int, box.xyxy[0])
         confidence = box.conf[0].item()
         
-        # Wytnij region tablicy
+        
         plate_region = safe_crop(obraz, x1, y1, x2, y2)
         
         if plate_region.size == 0:
             continue
         
-        # Preprocessing
+        
         plate_bez_paska = remove_left_strip(plate_region, percent=0.12, keep_margin_px=6)
         plate_czysty = preprocess_plate(plate_bez_paska)
         
-        # OCR bez ściskania
+        
         odczyt_bez = ocr_plate(plate_czysty)
         
-        # OCR ze ściskaniem przerw
+        
         plate_zbity = collapse_vertical_gaps(plate_czysty)
         odczyt_z = ocr_plate(plate_zbity)
         
-        # Wybierz lepszy odczyt
+        
         odczytany_tekst = odczyt_z if odczyt_z else odczyt_bez
         
-        # Pobierz oczekiwane numery z XML
+        
         expected_list = expected_plates.get(image_file, [""])
         expected = expected_list[0] if expected_list else ""
         
-        # Fuzzy matching - jeśli odczyt jest zbliżony do jednego z oczekiwanych, użyj oczekiwanego
+        
         if odczytany_tekst and expected:
             fuzzy_result = fuzzy_match(odczytany_tekst, expected_list, threshold=3)
             if fuzzy_result != odczytany_tekst:
-                # Znaleźliśmy dopasowanie fuzzy
+                print(f"Zmieniono odczyt: {odczytany_tekst} -> {fuzzy_result}")
                 odczytany_tekst = fuzzy_result
         
         # Porównaj
         is_correct = (odczytany_tekst == expected) if expected else False
-        status = "✅" if is_correct else "❌"
+        status = "Odczytano poprawnie" if is_correct else "Odczyt błedny"
         
         total_plates += 1
         if is_correct:
@@ -260,11 +253,15 @@ for image_file in image_files:
 # Podsumowanie
 accuracy = (correct_plates / total_plates * 100) if total_plates > 0 else 0
 print(f"\n{'='*80}")
-print(f"📊 PODSUMOWANIE:")
+print(f" PODSUMOWANIE:")
 print(f"{'='*80}")
 print(f"Razem tablic: {total_plates}")
 print(f"Poprawne odczyty: {correct_plates}")
 print(f"Błędne odczyty: {total_plates - correct_plates}")
 print(f"Dokładność: {accuracy:.1f}%")
 print(f"{'='*80}\n")
-print("✅ Koniec przetwarzania!")
+print(" Koniec przetwarzania!")
+
+
+def szlaban(film):
+    pass
