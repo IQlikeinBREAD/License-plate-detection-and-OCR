@@ -1,5 +1,16 @@
 from ultralytics import YOLO
 
-model = YOLO('yolo11n.pt')
+if __name__ == '__main__':
+    model = YOLO('yolo11n.pt')
 
-results = model.train(data='yolo/data.yaml', epochs=20, imgsz=640)
+    print("Rozpoczynam trening na 100 epok...")
+    results = model.train(
+        data='yolo/data.yaml', 
+        epochs=100,
+        imgsz=640,
+        device=0,
+        patience=20,
+        batch=16,
+    )
+
+    print("Trening zakończony! Sprawdź folder runs/detect")
