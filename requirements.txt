@@ -1,5 +1,4 @@
-paddlepaddle
-paddleocr
+easyocr
 opencv-python
 lxml
 ultralytics

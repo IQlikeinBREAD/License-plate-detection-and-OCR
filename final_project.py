@@ -1,77 +1,100 @@
 import cv2
-import os
 import numpy as np
-from ultralytics import YOLO
-from paddleocr import PaddleOCR
 import logging
+from ultralytics import YOLO
+import easyocr
 
-logging.getLogger("ppocr").setLevel(logging.WARNING)
+logging.getLogger("easyocr").setLevel(logging.WARNING)
 
-MODEL_PATH = 'runs/detect/train8/weights/best.pt'
-FOLDER_ZDJEC = 'dataset/images'
+MODEL_PATH = "runs/detect/train8/weights/best.pt"
+VIDEO_PATH = "auta.mp4"
+TARGET_PLATE = "SY8823H"
 
-def add_padding(img, size=15):
-    return cv2.copyMakeBorder(img, size, size, size, size, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+WYMAGANE_KLATKI = 20
+MIN_POLE_POWIERZCHNI = 5000
 
-def pokaz(nazwa, img):
-    if img is None or img.size == 0: return
+print("Ładowanie modeli...")
+yolo_model = YOLO(MODEL_PATH)
+ocr = easyocr.Reader(['en'], gpu=True)
+
+def safe_crop(img, xtl, ytl, xbr, ybr):
     h, w = img.shape[:2]
-    if h > 200:
-        f = 200 / h
-        img = cv2.resize(img, None, fx=f, fy=f)
-    cv2.imshow(nazwa, img)
+    xtl = max(0, min(w - 1, xtl))
+    xbr = max(0, min(w, xbr))
+    ytl = max(0, min(h - 1, ytl))
+    ybr = max(0, min(h, ybr))
+    if xbr <= xtl or ybr <= ytl: return np.zeros((0, 0, 3), dtype=np.uint8)
+    return img[ytl:ybr, xtl:xbr]
 
-if __name__ == '__main__':
-    yolo = YOLO(MODEL_PATH)
-    ocr = PaddleOCR(lang='en', use_angle_cls=False, enable_mkldnn=False)
+def remove_left_strip(img, percent=0.12):
+    h, w = img.shape[:2]
+    cut = int(w * percent)
+    return img[:, cut:]
 
-    pliki = sorted([f for f in os.listdir(FOLDER_ZDJEC) if f.endswith('.jpg')])
+def preprocess_plate(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+    return gray 
 
-    for plik in pliki:
-        frame = cv2.imread(os.path.join(FOLDER_ZDJEC, plik))
-        if frame is None: continue
+def normalize_text(s):
+    return "".join(ch for ch in s if ch.isalnum()).upper()
 
-        results = yolo(frame, conf=0.25, verbose=False)
+cap = cv2.VideoCapture(VIDEO_PATH)
+licznik_zaufania = 0
 
-        if results[0].boxes:
-            # Bierzemy najlepszą ramkę
-            best_box = max(results[0].boxes, key=lambda x: x.conf[0])
-            x1, y1, x2, y2 = map(int, best_box.xyxy[0])
-            
-            # Wycinamy z minimalnym marginesem (zapasem) z YOLO
-            h, w, _ = frame.shape
-            pad = 5
-            x1, y1 = max(0, x1-pad), max(0, y1-pad)
-            x2, y2 = min(w, x2+pad), min(h, y2+pad)
-            
-            wycinek = frame[y1:y2, x1:x2]
+while True:
+    ret, frame = cap.read()
+    if not ret: break
 
-            # 1. Odcinamy Pasek PL (tylko 8% szerokości)
-            h_crop, w_crop = wycinek.shape[:2]
-            cut_pl = int(w_crop * 0.08) 
-            wycinek = wycinek[:, cut_pl:]
+    results = yolo_model.predict(frame, conf=0.5, verbose=False)
+    
+    detected_text = ""
+    box_color = (0, 0, 255)
+    status_msg = "WERYFIKACJA..."
 
-            # 2. Szarość + Powiększenie + Padding (Kluczowe dla OCR)
-            gray = cv2.cvtColor(wycinek, cv2.COLOR_BGR2GRAY)
-            gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            
-            # Dodajemy białą ramkę, żeby tekst nie dotykał krawędzi
-            final_ocr_img = add_padding(gray, size=20)
-            
-            # Konwersja do BGR dla Paddle
-            img_input = cv2.cvtColor(final_ocr_img, cv2.COLOR_GRAY2BGR)
+    found_target = False
 
-            res = ocr.ocr(img_input)
-            
-            txt = ""
-            if res and res[0]:
-                txt = "".join([line[1][0] for line in res[0]])
-            
-            print(f"{plik} | OCR widzi: {txt}")
-            
-            pokaz("Co widzi OCR", img_input)
-            pokaz("Oryginal", frame)
-            
-            if cv2.waitKey(0) == ord('q'): break
+    if results and len(results[0].boxes) > 0:
 
-    cv2.destroyAllWindows()
+        best_box = max(results[0].boxes, key=lambda x: x.conf[0])
+        x1, y1, x2, y2 = map(int, best_box.xyxy[0])
+        
+        szerokosc = x2 - x1
+        wysokosc = y2 - y1
+        pole_ramki = szerokosc * wysokosc
+
+        plate_img = safe_crop(frame, x1, y1, x2, y2)
+        if plate_img.size > 0:
+            clean_plate = preprocess_plate(remove_left_strip(plate_img))
+            try:
+                txt_list = ocr.readtext(clean_plate, detail=0)
+                detected_text = normalize_text("".join(txt_list))
+            except: pass
+
+        if detected_text == TARGET_PLATE and pole_ramki > MIN_POLE_POWIERZCHNI:
+            licznik_zaufania += 1
+            found_target = True
+        else:
+            if licznik_zaufania > 0:
+                licznik_zaufania -= 1
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+        cv2.putText(frame, f"Pole: {pole_ramki} | Licznik: {licznik_zaufania}/{WYMAGANE_KLATKI}", 
+                    (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+    if licznik_zaufania >= WYMAGANE_KLATKI:
+        status_msg = "DOSTEP PRZYZNANY"
+        box_color = (0, 255, 0)
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], 80), (0, 255, 0), -1)
+        cv2.putText(frame, f"WITAJ!", (50, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 3)
+
+    else:
+        progress = int((licznik_zaufania / WYMAGANE_KLATKI) * frame.shape[1])
+        cv2.rectangle(frame, (0, frame.shape[0]-20), (progress, frame.shape[0]), (0, 255, 255), -1)
+
+    cv2.imshow("System Wjazdowy", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
+
+cap.release()
+cv2.destroyAllWindows()
