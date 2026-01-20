@@ -263,14 +263,100 @@ print(f"{'='*80}\n")
 print(" Koniec przetwarzania!")
 
 
-def szlaban(film):
-    for klatka in film:
-        cv2.imshow("Szlaban", klatka)
-        if plate_region == odczytany_tekst:
-            print("Szlaban otwarty")
-        else:
-            print("Szlaban zamknięty")
-        break
+def szlaban(video_path: str) -> None:
+    """
+    Funkcja kontroluje szlaban na podstawie odczytu numeru rejestracyjnego.
+    Jeśli odczytany numer jest w bazie (annotations.xml) - szlaban otwarty.
+    Jeśli nie ma w bazie - szlaban zamknięty.
+    
+    Args:
+        video_path: ścieżka do pliku wideo
+    """
+    
+    # Wczytaj bazę numerów z XML
+    baza_numerow = set()
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        for image in root.findall("image"):
+            for box in image.findall("box"):
+                attr = box.find("attribute")
+                if attr is not None and attr.text:
+                    baza_numerow.add(normalize_text(attr.text))
+        print(f"✓ Wczytano {len(baza_numerow)} numerów z bazy danych")
+    except Exception as e:
+        print(f"✗ Błąd przy wczytywaniu bazy: {e}")
+        return
+    
+    # Otwórz plik wideo
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"✗ Nie można otworzyć pliku: {video_path}")
+            return
+        
+        frame_count = 0
+        recognized_plates = []
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_count += 1
+            
+            # Detekuj tablice YOLO
+            yolo_results = yolo_model.predict(frame, conf=0.5, verbose=False)
+            
+            if not yolo_results or len(yolo_results[0].boxes) == 0:
+                print(f"[Klatka {frame_count}] Brak detekcji tablicy")
+                continue
+            
+            # Przetwórz każdą znalezioną tablicę
+            for idx, box in enumerate(yolo_results[0].boxes):
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                confidence = box.conf[0].item()
+                
+                # Wytnij region tablicy
+                plate_region = safe_crop(frame, x1, y1, x2, y2)
+                
+                if plate_region.size == 0:
+                    continue
+                
+                # Przetwórz obraz tablicy
+                plate_bez_paska = remove_left_strip(plate_region, percent=0.12, keep_margin_px=6)
+                plate_czysty = preprocess_plate(plate_bez_paska)
+                
+                # Odczytaj numer
+                odczyt_bez = ocr_plate(plate_czysty)
+                plate_zbity = collapse_vertical_gaps(plate_czysty)
+                odczyt_z = ocr_plate(plate_zbity)
+                
+                odczytany_tekst = odczyt_z if odczyt_z else odczyt_bez
+                
+                if odczytany_tekst:
+                    recognized_plates.append(odczytany_tekst)
+                    
+                    # Sprawdź czy numer jest w bazie
+                    if odczytany_tekst in baza_numerow:
+                        print(f"[Klatka {frame_count}] ✓ SZLABAN OTWARTY | Numer: {odczytany_tekst} | Pewność: {confidence:.2%}")
+                    else:
+                        print(f"[Klatka {frame_count}] ✗ SZLABAN ZAMKNIĘTY | Numer: {odczytany_tekst} | Pewność: {confidence:.2%}")
+        
+        cap.release()
+        
+        # Podsumowanie
+        print(f"\n{'='*80}")
+        print(f"Przetworzono {frame_count} klatek")
+        print(f"Rozpoznano tablice: {len(set(recognized_plates))}")
+        if recognized_plates:
+            print(f"Unikalne numery: {', '.join(sorted(set(recognized_plates)))}")
+        print(f"{'='*80}")
+        
+    except Exception as e:
+        print(f"✗ Błąd podczas przetwarzania wideo: {e}")
+        cap.release()
+        return
 
 
         
