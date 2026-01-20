@@ -264,4 +264,14 @@ print(" Koniec przetwarzania!")
 
 
 def szlaban(film):
-    pass
+    for klatka in film:
+        cv2.imshow("Szlaban", klatka)
+        if plate_region == odczytany_tekst:
+            print("Szlaban otwarty")
+        else:
+            print("Szlaban zamknięty")
+        break
+
+
+        
+
